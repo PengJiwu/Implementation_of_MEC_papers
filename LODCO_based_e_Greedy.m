@@ -1,6 +1,21 @@
 clc, clear
 %% ================= Simulation of LODCO-Based eps-Greedy Algorithm =================
 
+% ======================================================================
+
+
+
+
+% 此处关于键值对的处理仍然有问题！
+
+
+
+
+% =====================================================================
+
+
+
+
 %% 基本参数设置
 k = 1e-28;                        % 有效开关电容
 tau = 0.002;                      % 时间片长度(s)
@@ -14,18 +29,18 @@ E_max = 0.002;                    % 电池允许的最大放电量(J)
 L = 1000;                         % 一项计算任务的大小(bit)
 X = 737.5;                        % 移动设备执行一项计算任务所需的时钟周期个数
 W = 737500;                       % 移动设备本地执行一项计算任务所需的时钟周期个数(L*X)
+E_H_max = 48e-6;                  % 收集的能量服从的均匀分布上限(J)
 g0 = 1e-4;                        % 路径损失常数(dB转化之后的数值比)
 d0 = 1;                           % 服务器和移动设备之间的相对距离(m)
 
 %% 变量控制
 N = 10;                           % 移动设备数目
 M = 20;                           % MEC服务器个数
-T = 50;                           % 时间片个数
+T = 1000;                           % 时间片个数
 E_min = 0.02e-3;                  % 能量使用下界(J)
 V = 1e-5;                         % LODCO中penalty项的权重(J^2/second)
-rho = 0.7;                        % 计算任务抵达的概率
-E_H_max = 48e-6;                  % 收集的能量服从的均匀分布上限(J)
-eps = 0.1;                        % 用于贪心算法的决策
+rho = 0.6;                        % 计算任务抵达的概率
+eps = 0.25;                        % 用于贪心算法的决策
 
 % 实际能耗上限
 E_max_hat = min(max(k*W*(f_max^2), p_tx_max*tau), E_max);
@@ -64,26 +79,26 @@ while t <= T
 
     for i = 1:N
         %% 对每一个移动设备，阶段初始化
+        %% 求解optimal energy harvesting e* (不管是否有任务产生，能量收集都不能停！)
+        % 产生E_H_t
+        E_H_t = unifrnd(0, E_H_max);
+        if B_hat(t, i) <= 0
+            e(t, i) = E_H_t;
+        end
+
         % 以伯努利分布产生计算任务
         zeta = binornd(1, rho);
         if zeta == 0
             % 没有计算任务产生
             indicator(t, i) = 4;
-            f(t, i) = 0; p(t, i) = 0;
+            % f(t, i) = 0; p(t, i) = 0;    默认即为0
         else
-            %% 求解optimal energy harvesting e*
-            % 产生E_H_t
-            E_H_t = unifrnd(0, E_H_max);
-            if B_hat(t,i) <= 0                    % 初始值为0，因此无需讨论大于0的情形
-                e(t, i) = E_H_t;
-            end
-
             %% 求解P_ME
             f_L = max(sqrt(E_min/(k*W)), W/tau_d);
             f_U = min(sqrt(E_min/(k*W)), f_max);
             if f_L <= f_U
                 % P_ME有解
-                f0 = power(V/(-1*B_hat(t,i)*k), 1/3);
+                f0 = power(V/(-2*B_hat(t,i)*k), 1/3);
                 if f0 > f_U
                     f(t, i) = f_U;
                 elseif f0 >= f_L && f0 <= f_U && B_hat(t,i) < 0
@@ -96,26 +111,28 @@ while t <= T
                 % 计算此时的能耗
                 E_local(t, i) = k * W * (f(t, i)^2);
                 if E_local(t, i) >= B(t, i)
-                    disp(['P_ME电量不足![此时t为', num2str(t), ']']);
+                    disp(['本地执行电量不足![此时t为', num2str(t), ']']);
                     J_m(i) = inf;    % 设置为inf可以保证一定比phi小
                 else
-                    % 计算此时的J_m(只考虑延迟，不计算能耗)
-                    J_m(i) = W/f(t, i);
+                    % 计算此时的J_m
+                    % J_m代表的是子问题的目标函数值！是能耗和延迟统一变换后的结果，而非仅仅是延迟！
+                    J_m(i) = -B_hat(t,i)*E_local(t, i) + V*local_execution_delay(t, i);
                 end
 
             else
                 disp(['P_ME无解![此时t为', num2str(t), ']']);
-                % 因此indicator(t, 1) = 0不变
                 J_m(i) = inf;
             end
 
             %% 求解P_SE
             % 随机产生服务器和移动设备的距离(限定在0 ~ 80之内)
-            D = unifrnd(0, 60, N, M);
+            D = unifrnd(0, 100, N, M);
             % 服从lambda=1的指数分布的小尺度衰落信道功率收益
             gamma = exprnd(1, N, M);
             % 从任意移动设备到任意服务器的信道功率增益
             h = g0*gamma.*power(d0./D, 4);
+            % 保存当前移动设备对所有服务器的卸载执行延迟
+            remote_execution_delay_tmp = zeros(M, 1);
 
             for j = 1:M
                 tmp_h = h(i,j);
@@ -127,7 +144,7 @@ while t <= T
                     % 计算p_Emin
                     y = @(x)x*L-omega*log2(1+tmp_h*x/sigma)*E_min;
                     %p_Emin = double(vpa(solve(y, 1)));
-                    tmp = fsolve(y, [0.001, 1], opt);
+                    tmp = fsolve(y, [0.0000000001, 1], opt);
                     p_Emin = real(max(tmp));
                     p_L = max(p_L_taud, p_Emin);
                 end
@@ -149,7 +166,7 @@ while t <= T
                     % 计算p0
                     tmp = B_hat(t,i);
                     y = @(x)tmp*log2(1+tmp_h*x/sigma) + tmp_h*(V-tmp*x)/(log(2)*(sigma+tmp_h*x));
-                    p0 = real(max(fsolve(y, [0.001, 1], opt)));
+                    p0 = real(max(fsolve(y, [0.00000000001, 1], opt)));
                     if p_U < p0
                         p(t,i) = p_U;
                     elseif p_L > p0 && B_hat(t,i) < 0
@@ -159,14 +176,17 @@ while t <= T
                     end
                     % 计算achievable rate
                     r = calAchieveRate(tmp_h, p(t,i), omega, sigma);
+                    % 计算此时的延迟
+                    remote_execution_delay_tmp(j) = L / r;
                     % 计算此时的能耗
-                    E_remote(t, i) = p(t,i) * remote_execution_delay(t, i);
+                    E_remote(t, i) = p(t,i)*L / r;
                     if E_remote(t, i) >= B(t, i)
-                        disp(['P_SE电量不足![此时t为', num2str(t), ']']);
+                        disp(['卸载执行电量不足![此时t为', num2str(t), ']']);
                         J_s = inf;
                     else
-                        % 计算此时的J_s(只计算延迟，不考虑能耗)
-                        J_s = L/r;
+                        % 计算此时的J_s
+                        % J_s是卸载执行子问题的目标函数值，而非延迟！！
+                        J_s = -B_hat(t,i)*E_remote(t,i) + V*remote_execution_delay_tmp(j);
                     end
                 else
                     disp(['P_SE无解![此时t为', num2str(t), ']']);
@@ -175,10 +195,12 @@ while t <= T
                 end
                 J_s_matrix(i,j) = J_s;
             end
-            % 计算此时的execution delay
-            remote_execution_delay(t, i) = min(J_s_matrix(i,:));
-            % 保存最佳的execution delay及其对应的服务器编号
+            
+            % 选取出最佳的键值对组合
             [J_s_best, j_best] = min(J_s_matrix(i,:));
+            % 计算此时的execution delay
+            remote_execution_delay(t, i) = remote_execution_delay_tmp(j_best);
+
             %% 为第i个移动设备选取最佳模式
             [~, mode] = min([J_m(i), J_s_best, phi]);
             indicator(t, i) = mode;
@@ -204,32 +226,35 @@ while t <= T
         
         % 此时只考虑卸载执行，即不比较卸载执行是否为三者最佳
         if rand() <= eps
+            % 当前移动设备很幸运，对其而言最优的卸载对象还可以再接收任务
             if flags(min_j) <= UB
                 % 从map中删除该键值对并同步一系列共同维护的变量
                 map(index,:) = [];
                 % 对应的MEC服务器自增1(该操作的位置发生了变化，论文此处需要修改)
                 flags(min_j) = flags(min_j) + 1;
-                % 将J_s_matrix(min_i,min_j)设为inf
-                J_s_matrix(min_i,min_j) = inf;
             else
+                % flags(min_j)已达上限，将那些最佳卸载对象为min_j的移动设备此时的目标函数值都设为inf，即不可达
+                % (这个操作对于已经完成卸载的服务器而言不会有任何影响，因为它们不可能再出现在map中)
+                % 此时这个设备min_i只能重新选择次最优的卸载对象
+                J_s_matrix(:, min_j) = inf;
+                % 此时无需更新map，之后map会根据最新的J_s_matrix来更新自己的值
+
+                % 为min_i重新选择一个次最优的卸载对象.当该移动设备还有能选的服务器的时候，在这些可选的服务器中找到J_s最小的那个
+                % 第一种情况: 还有服务器没满，可以选
                 if min(J_s_matrix(min_i,:)) ~= inf
-                    % 当该移动设备还有能选的服务器的时候，不断找能找到的最小的那个
-                    % 此处论文需要补充！找到最小的那个之后，覆盖map中该移动设备选取的服务器，并覆盖对应的Js最小值
+                    % 找到最小的那个之后，覆盖map中该移动设备选取的服务器，并覆盖对应的Js最小值
                     [min_Js_second, min_j_second] = min(J_s_matrix(min_i,:));
                     map(index,2:3) = [min_j_second,min_Js_second];
-                    % 返回最外层的while，重新开始找最小的Js
+                    % 返回最外层的while，重新开始找当前具有最小J_s值的设备和对应的服务器
                     continue;
+                % 第二种情况: 很不幸，每一个服务器都满了
                 else
                     % 没有服务器可以选了，只能在另外两种mode中选取
                     % 重新设置指示变量
                     [~, mode] = min([J_m(min_i), inf, phi]);
-                    indicator(t, i) = mode;
-                    % 从map中删除该键值对并同步一系列共同维护的变量(此处论文需要补充)
+                    indicator(t,i) = mode;
+                    % 从map中删除该键值对并同步一系列共同维护的变量，因为map只存放欲图卸载执行的设备
                     map(index,:) = [];
-                    %{
-                    ==min_i已绝无再出现的可能，因此没有必要再将J_s_matrix(min_i,min_j)设为inf==
-                    J_s_matrix(min_i,min_j) = inf;
-                    %}
                 end
             end
         else
